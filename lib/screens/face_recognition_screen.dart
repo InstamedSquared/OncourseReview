@@ -49,15 +49,15 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
 
     _cameraController = CameraController(
       frontCamera,
-      ResolutionPreset.medium,
+      ResolutionPreset.high,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.jpeg,
     );
 
     try {
       await _cameraController!.initialize();
-      // Remove lockCaptureOrientation for now to see if system handles it better
-      // await _cameraController!.lockCaptureOrientation(DeviceOrientation.portraitUp);
+      // Force orientation to portrait to ensure ML Kit gets upright images
+      await _cameraController!.lockCaptureOrientation(DeviceOrientation.portraitUp);
       
       if (!mounted) return;
       setState(() {
