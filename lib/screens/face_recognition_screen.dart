@@ -423,6 +423,35 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                       ),
                     ),
                   ),
+
+                  // -------------------------------------------------------
+                  // REVIEW-ONLY: Skip button for Apple TestFlight reviewers.
+                  // Remove this block after review is approved.
+                  // -------------------------------------------------------
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 32),
+                    child: TextButton(
+                      onPressed: () {
+                        _cameraController?.stopImageStream();
+                        Navigator.pushReplacement(
+                          context,
+                          MaterialPageRoute(builder: (_) => const MainShell()),
+                        );
+                      },
+                      child: Text(
+                        'Skip for now →',
+                        style: TextStyle(
+                          color: isDark
+                              ? Colors.white38
+                              : Colors.black26,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ),
+                  // -------------------------------------------------------
+
                 ],
               ),
             ),
