@@ -19,12 +19,13 @@ class FaceRecognitionScreen extends StatefulWidget {
 class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
   CameraController? _cameraController;
   final FaceDetector _faceDetector = FaceDetector(
-      options: FaceDetectorOptions(
-    enableContours: true,
-    enableClassification: true,
-    performanceMode: FaceDetectorMode.accurate,
-  ));
-  
+    options: FaceDetectorOptions(
+      enableContours: true,
+      enableClassification: true,
+      performanceMode: FaceDetectorMode.accurate,
+    ),
+  );
+
   bool _isProcessing = false;
   bool _isCameraInitialized = false;
   String _statusMessage = 'Looking for a face...';
@@ -53,33 +54,39 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
       frontCamera,
       ResolutionPreset.high,
       enableAudio: false,
-      imageFormatGroup: ImageFormatGroup.jpeg,
+      imageFormatGroup: Platform.isAndroid
+          ? ImageFormatGroup.nv21
+          : ImageFormatGroup.bgra8888,
     );
 
     try {
       await _cameraController!.initialize();
       // Force orientation to portrait to ensure ML Kit gets upright images
-      await _cameraController!.lockCaptureOrientation(DeviceOrientation.portraitUp);
-      
+      await _cameraController!.lockCaptureOrientation(
+        DeviceOrientation.portraitUp,
+      );
+
       if (!mounted) return;
       setState(() {
         _isCameraInitialized = true;
       });
-      
+
       // Start stream-based detection
       _startStream();
     } catch (e) {
       if (mounted) {
         setState(() {
-          _statusMessage = 'Camera initialization failed. Please check permissions.';
+          _statusMessage =
+              'Camera initialization failed. Please check permissions.';
         });
       }
     }
   }
-  
+
   void _startStream() {
-    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
-    
+    if (_cameraController == null || !_cameraController!.value.isInitialized)
+      return;
+
     _cameraController!.startImageStream((CameraImage image) {
       if (_canProcess && !_isProcessing) {
         _processCameraImage(image);
@@ -89,7 +96,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
 
   Future<void> _processCameraImage(CameraImage image) async {
     if (_cameraController == null) return;
-    
+
     setState(() {
       _isProcessing = true;
     });
@@ -101,22 +108,31 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
       }
       final bytes = allBytes.done().buffer.asUint8List();
 
-      final Size imageSize = Size(image.width.toDouble(), image.height.toDouble());
+      final Size imageSize = Size(
+        image.width.toDouble(),
+        image.height.toDouble(),
+      );
       final camera = (await availableCameras()).firstWhere(
         (c) => c.lensDirection == CameraLensDirection.front,
       );
-      
+
       // Handle orientation correctly for ML Kit
       final sensorOrientation = camera.sensorOrientation;
       final InputImageRotation rotation;
-      
+
       if (Platform.isIOS) {
-         rotation = InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation90deg;
+        rotation =
+            InputImageRotationValue.fromRawValue(sensorOrientation) ??
+            InputImageRotation.rotation90deg;
       } else {
-         rotation = InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation0deg;
+        rotation =
+            InputImageRotationValue.fromRawValue(sensorOrientation) ??
+            InputImageRotation.rotation0deg;
       }
 
-      final InputImageFormat format = InputImageFormatValue.fromRawValue(image.format.raw) ?? InputImageFormat.nv21;
+      final InputImageFormat format =
+          InputImageFormatValue.fromRawValue(image.format.raw) ??
+          InputImageFormat.nv21;
 
       final inputImageMetadata = InputImageMetadata(
         size: imageSize,
@@ -125,7 +141,10 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
         bytesPerRow: image.planes[0].bytesPerRow,
       );
 
-      final inputImage = InputImage.fromBytes(bytes: bytes, metadata: inputImageMetadata);
+      final inputImage = InputImage.fromBytes(
+        bytes: bytes,
+        metadata: inputImageMetadata,
+      );
       final faces = await _faceDetector.processImage(inputImage);
 
       if (faces.isEmpty) {
@@ -141,19 +160,19 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
       // FACE DETECTED!
       _canProcess = false; // Stop processing stream
       await _cameraController!.stopImageStream();
-      
+
       if (mounted) {
         setState(() {
-            _statusMessage = 'Face detected! Capturing for verification...';
+          _statusMessage = 'Face detected! Capturing for verification...';
         });
       }
 
       // Capture final high-res picture for server verification
       final XFile imageFile = await _cameraController!.takePicture();
-      
+
       if (mounted) {
         setState(() {
-            _statusMessage = 'Verifying identity...';
+          _statusMessage = 'Verifying identity...';
         });
       }
 
@@ -167,11 +186,14 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
           });
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-                content: Text('Identity Verified! Redirecting to Dashboard...'),
-                backgroundColor: Colors.green),
+              content: Text('Identity Verified! Redirecting to Dashboard...'),
+              backgroundColor: Colors.green,
+            ),
           );
           Navigator.pushReplacement(
-              context, MaterialPageRoute(builder: (_) => const MainShell()));
+            context,
+            MaterialPageRoute(builder: (_) => const MainShell()),
+          );
         }
       } else {
         if (mounted) {
@@ -185,31 +207,35 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
               ),
             );
             Navigator.pushReplacement(
-                context, MaterialPageRoute(builder: (_) => const LoginScreen()));
+              context,
+              MaterialPageRoute(builder: (_) => const LoginScreen()),
+            );
             return;
           }
 
           setState(() {
-            _statusMessage = 'Face not recognized.\n(${3 - _failedAttempts} attempts left)';
+            _statusMessage =
+                'Face not recognized.\n(${3 - _failedAttempts} attempts left)';
           });
-          
+
           await Future.delayed(const Duration(seconds: 3));
           if (mounted) {
-             _canProcess = true;
-             _isProcessing = false;
-             _startStream();
+            _canProcess = true;
+            _isProcessing = false;
+            _startStream();
           }
         }
       }
     } catch (e) {
+      debugPrint('Face detection error: $e');
       if (mounted) {
         setState(() {
           _statusMessage = 'Detection error. Retrying...';
           _isProcessing = false;
         });
-        await Future.delayed(const Duration(seconds: 1));
+        await Future.delayed(const Duration(seconds: 2));
         if (mounted) {
-           _canProcess = true;
+          _canProcess = true;
         }
       }
     }
@@ -225,14 +251,21 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final Color bgColorStart = isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC);
-    final Color bgColorEnd = isDark ? const Color(0xFF1E293B) : const Color(0xFFEFF6FF);
+    final Color bgColorStart = isDark
+        ? const Color(0xFF0F172A)
+        : const Color(0xFFF8FAFC);
+    final Color bgColorEnd = isDark
+        ? const Color(0xFF1E293B)
+        : const Color(0xFFEFF6FF);
 
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white),
+          icon: const Icon(
+            Icons.arrow_back_ios_new_rounded,
+            color: Colors.white,
+          ),
           onPressed: () => Navigator.pop(context),
         ),
         title: const Text(
@@ -258,17 +291,26 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
             Positioned(
               left: -50,
               top: 100,
-              child: _buildBackgroundCircle(200, _primaryColor.withOpacity(0.15)),
+              child: _buildBackgroundCircle(
+                200,
+                _primaryColor.withOpacity(0.15),
+              ),
             ),
             Positioned(
               right: -80,
               bottom: 100,
-              child: _buildBackgroundCircle(250, _primaryColor.withOpacity(0.1)),
+              child: _buildBackgroundCircle(
+                250,
+                _primaryColor.withOpacity(0.1),
+              ),
             ),
             Positioned(
               left: 40,
               bottom: -50,
-              child: _buildBackgroundCircle(150, _primaryColor.withOpacity(0.12)),
+              child: _buildBackgroundCircle(
+                150,
+                _primaryColor.withOpacity(0.12),
+              ),
             ),
 
             // Main Content
@@ -276,7 +318,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
               child: Column(
                 children: [
                   const SizedBox(height: 100),
-                  
+
                   // Camera Section with Glass Frame
                   Expanded(
                     child: Center(
@@ -298,7 +340,7 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                               ],
                             ),
                           ),
-                          
+
                           // Camera Preview Circle
                           ClipOval(
                             child: Container(
@@ -306,15 +348,20 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                               height: 300,
                               decoration: BoxDecoration(
                                 color: Colors.black.withOpacity(0.2),
-                                border: Border.all(color: Colors.white.withOpacity(0.2), width: 1.5),
+                                border: Border.all(
+                                  color: Colors.white.withOpacity(0.2),
+                                  width: 1.5,
+                                ),
                               ),
                               child: _isCameraInitialized
                                   ? LayoutBuilder(
                                       builder: (context, constraints) {
                                         // The camera aspect ratio is usually width/height.
                                         // For vertical orientation, we want the inverse or to scale correctly.
-                                        double aspectRatio = _cameraController!.value.aspectRatio;
-                                        
+                                        double aspectRatio = _cameraController!
+                                            .value
+                                            .aspectRatio;
+
                                         // On most devices, aspectRatio is > 1.0 (landscape sensor)
                                         // We want to ensure the preview fills the square container (BoxFit.cover)
                                         return FittedBox(
@@ -322,18 +369,24 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                                           child: SizedBox(
                                             width: constraints.maxWidth,
                                             // Multiply by aspectRatio if it's landscape to get portrait height
-                                            height: constraints.maxWidth * aspectRatio,
-                                            child: CameraPreview(_cameraController!),
+                                            height:
+                                                constraints.maxWidth *
+                                                aspectRatio,
+                                            child: CameraPreview(
+                                              _cameraController!,
+                                            ),
                                           ),
                                         );
                                       },
                                     )
                                   : const Center(
-                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
                                     ),
                             ),
                           ),
-                          
+
                           // Dynamic Border Ring
                           Container(
                             width: 310,
@@ -341,16 +394,21 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
                               border: Border.all(
-                                color: _isProcessing 
-                                    ? _primaryColor.withOpacity(0.5) 
-                                    : (_statusMessage.contains('not recognized') || _statusMessage.contains('error') 
-                                        ? Colors.redAccent.withOpacity(0.5) 
-                                        : Colors.greenAccent.withOpacity(0.5)),
+                                color: _isProcessing
+                                    ? _primaryColor.withOpacity(0.5)
+                                    : (_statusMessage.contains(
+                                                'not recognized',
+                                              ) ||
+                                              _statusMessage.contains('error')
+                                          ? Colors.redAccent.withOpacity(0.5)
+                                          : Colors.greenAccent.withOpacity(
+                                              0.5,
+                                            )),
                                 width: 2,
                               ),
                             ),
                           ),
-                          
+
                           // Processing Animated Ring
                           if (_isProcessing)
                             SizedBox(
@@ -358,7 +416,9 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                               height: 314,
                               child: CircularProgressIndicator(
                                 strokeWidth: 3,
-                                valueColor: AlwaysStoppedAnimation<Color>(_primaryColor),
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  _primaryColor,
+                                ),
                               ),
                             ),
                         ],
@@ -368,7 +428,10 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
 
                   // Status / Instruction Overlay
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 24,
+                      vertical: 40,
+                    ),
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(24),
                       child: BackdropFilter(
@@ -376,10 +439,14 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                         child: Container(
                           padding: const EdgeInsets.all(20),
                           decoration: BoxDecoration(
-                            color: isDark ? Colors.white.withOpacity(0.08) : Colors.black.withOpacity(0.05),
+                            color: isDark
+                                ? Colors.white.withOpacity(0.08)
+                                : Colors.black.withOpacity(0.05),
                             borderRadius: BorderRadius.circular(24),
                             border: Border.all(
-                              color: (_statusMessage.contains('not recognized') || _statusMessage.contains('error'))
+                              color:
+                                  (_statusMessage.contains('not recognized') ||
+                                      _statusMessage.contains('error'))
                                   ? Colors.redAccent.withOpacity(0.3)
                                   : Colors.white.withOpacity(0.1),
                               width: 1.5,
@@ -390,16 +457,25 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                               Container(
                                 padding: const EdgeInsets.all(10),
                                 decoration: BoxDecoration(
-                                  color: (_statusMessage.contains('not recognized') || _statusMessage.contains('error'))
+                                  color:
+                                      (_statusMessage.contains(
+                                            'not recognized',
+                                          ) ||
+                                          _statusMessage.contains('error'))
                                       ? Colors.redAccent.withOpacity(0.2)
                                       : _primaryColor.withOpacity(0.2),
                                   shape: BoxShape.circle,
                                 ),
                                 child: Icon(
-                                  (_statusMessage.contains('not recognized') || _statusMessage.contains('error'))
+                                  (_statusMessage.contains('not recognized') ||
+                                          _statusMessage.contains('error'))
                                       ? Icons.warning_amber_rounded
                                       : Icons.face_retouching_natural_rounded,
-                                  color: (_statusMessage.contains('not recognized') || _statusMessage.contains('error'))
+                                  color:
+                                      (_statusMessage.contains(
+                                            'not recognized',
+                                          ) ||
+                                          _statusMessage.contains('error'))
                                       ? Colors.redAccent
                                       : _primaryColor,
                                   size: 24,
@@ -410,7 +486,9 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                                 child: Text(
                                   _statusMessage,
                                   style: TextStyle(
-                                    color: isDark ? Colors.white : Colors.black87,
+                                    color: isDark
+                                        ? Colors.white
+                                        : Colors.black87,
                                     fontSize: 15,
                                     fontWeight: FontWeight.w600,
                                     height: 1.4,
@@ -423,8 +501,6 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
                       ),
                     ),
                   ),
-
-
                 ],
               ),
             ),
