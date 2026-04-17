@@ -1,7 +1,8 @@
+import 'dart:async';
 import 'dart:ui';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
@@ -29,9 +30,8 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
   bool _isProcessing = false;
   bool _isCameraInitialized = false;
   String _statusMessage = 'Looking for a face...';
-  // Removed _timer in favor of stream-based detection
   int _failedAttempts = 0;
-  bool _canProcess = true; // Guard for the stream
+  Timer? _detectionTimer;
 
   // Theme color (Light Blue)
   final Color _primaryColor = const Color(0xFF89D3EE);
@@ -44,7 +44,6 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
 
   Future<void> _initializeCamera() async {
     final cameras = await availableCameras();
-    // Try to find a front-facing camera
     final frontCamera = cameras.firstWhere(
       (camera) => camera.lensDirection == CameraLensDirection.front,
       orElse: () => cameras.first,
@@ -52,16 +51,12 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
 
     _cameraController = CameraController(
       frontCamera,
-      ResolutionPreset.high,
+      ResolutionPreset.medium,
       enableAudio: false,
-      imageFormatGroup: Platform.isAndroid
-          ? ImageFormatGroup.nv21
-          : ImageFormatGroup.bgra8888,
     );
 
     try {
       await _cameraController!.initialize();
-      // Force orientation to portrait to ensure ML Kit gets upright images
       await _cameraController!.lockCaptureOrientation(
         DeviceOrientation.portraitUp,
       );
@@ -71,9 +66,9 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
         _isCameraInitialized = true;
       });
 
-      // Start stream-based detection
-      _startStream();
+      _startDetectionLoop();
     } catch (e) {
+      debugPrint('Camera init error: $e');
       if (mounted) {
         setState(() {
           _statusMessage =
@@ -83,147 +78,107 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
     }
   }
 
-  void _startStream() {
-    if (_cameraController == null || !_cameraController!.value.isInitialized)
-      return;
-
-    _cameraController!.startImageStream((CameraImage image) {
-      if (_canProcess && !_isProcessing) {
-        _processCameraImage(image);
-      }
-    });
+  void _startDetectionLoop() {
+    _detectionTimer?.cancel();
+    _detectionTimer = Timer.periodic(
+      const Duration(milliseconds: 1500),
+      (_) => _detectFaceFromPicture(),
+    );
   }
 
-  Future<void> _processCameraImage(CameraImage image) async {
-    if (_cameraController == null) return;
+  void _stopDetectionLoop() {
+    _detectionTimer?.cancel();
+    _detectionTimer = null;
+  }
+
+  Future<void> _detectFaceFromPicture() async {
+    if (_isProcessing) return;
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      return;
+    }
 
     setState(() {
       _isProcessing = true;
     });
 
     try {
-      final WriteBuffer allBytes = WriteBuffer();
-      for (final Plane plane in image.planes) {
-        allBytes.putUint8List(plane.bytes);
-      }
-      final bytes = allBytes.done().buffer.asUint8List();
-
-      final Size imageSize = Size(
-        image.width.toDouble(),
-        image.height.toDouble(),
-      );
-      final camera = (await availableCameras()).firstWhere(
-        (c) => c.lensDirection == CameraLensDirection.front,
-      );
-
-      // Handle orientation correctly for ML Kit
-      final sensorOrientation = camera.sensorOrientation;
-      final InputImageRotation rotation;
-
-      if (Platform.isIOS) {
-        rotation =
-            InputImageRotationValue.fromRawValue(sensorOrientation) ??
-            InputImageRotation.rotation90deg;
-      } else {
-        rotation =
-            InputImageRotationValue.fromRawValue(sensorOrientation) ??
-            InputImageRotation.rotation0deg;
-      }
-
-      final InputImageFormat format =
-          InputImageFormatValue.fromRawValue(image.format.raw) ??
-          InputImageFormat.nv21;
-
-      final inputImageMetadata = InputImageMetadata(
-        size: imageSize,
-        rotation: rotation,
-        format: format,
-        bytesPerRow: image.planes[0].bytesPerRow,
-      );
-
-      final inputImage = InputImage.fromBytes(
-        bytes: bytes,
-        metadata: inputImageMetadata,
-      );
+      final XFile photo = await _cameraController!.takePicture();
+      final inputImage = InputImage.fromFilePath(photo.path);
       final faces = await _faceDetector.processImage(inputImage);
 
+      // Clean up temp file
+      try {
+        await File(photo.path).delete();
+      } catch (_) {}
+
+      if (!mounted) return;
+
       if (faces.isEmpty) {
-        if (mounted) {
-          setState(() {
-            _statusMessage = 'No face detected. Please position your face.';
-            _isProcessing = false;
-          });
-        }
+        setState(() {
+          _statusMessage = 'No face detected. Please position your face.';
+          _isProcessing = false;
+        });
         return;
       }
 
-      // FACE DETECTED!
-      _canProcess = false; // Stop processing stream
-      await _cameraController!.stopImageStream();
+      // Face detected — stop the loop and capture a final image for the server
+      _stopDetectionLoop();
 
-      if (mounted) {
-        setState(() {
-          _statusMessage = 'Face detected! Capturing for verification...';
-        });
-      }
+      setState(() {
+        _statusMessage = 'Face detected! Capturing for verification...';
+      });
 
-      // Capture final high-res picture for server verification
-      final XFile imageFile = await _cameraController!.takePicture();
+      final XFile verifyPhoto = await _cameraController!.takePicture();
 
-      if (mounted) {
-        setState(() {
-          _statusMessage = 'Verifying identity...';
-        });
-      }
+      setState(() {
+        _statusMessage = 'Verifying identity...';
+      });
 
-      // 3. Send image to server for Facial Verification
-      final response = await ApiService.verifyFace(imageFile.path);
+      final response = await ApiService.verifyFace(verifyPhoto.path);
+
+      if (!mounted) return;
 
       if (response['success'] == true) {
-        if (mounted) {
-          setState(() {
-            _statusMessage = 'Identity verification successful!';
-          });
+        setState(() {
+          _statusMessage = 'Identity verification successful!';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Identity Verified! Redirecting to Dashboard...'),
+            backgroundColor: Colors.green,
+          ),
+        );
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const MainShell()),
+        );
+      } else {
+        _failedAttempts++;
+        if (_failedAttempts >= 3) {
+          await ApiService.logout();
+          if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Identity Verified! Redirecting to Dashboard...'),
-              backgroundColor: Colors.green,
+              content: Text('Too many failed attempts. Returning to login.'),
+              backgroundColor: Colors.redAccent,
             ),
           );
           Navigator.pushReplacement(
             context,
-            MaterialPageRoute(builder: (_) => const MainShell()),
+            MaterialPageRoute(builder: (_) => const LoginScreen()),
           );
+          return;
         }
-      } else {
+
+        setState(() {
+          _statusMessage =
+              'Face not recognized.\n(${3 - _failedAttempts} attempts left)';
+          _isProcessing = false;
+        });
+
+        await Future.delayed(const Duration(seconds: 3));
         if (mounted) {
-          _failedAttempts++;
-          if (_failedAttempts >= 3) {
-            await ApiService.logout();
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Too many failed attempts. Returning to login.'),
-                backgroundColor: Colors.redAccent,
-              ),
-            );
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (_) => const LoginScreen()),
-            );
-            return;
-          }
-
-          setState(() {
-            _statusMessage =
-                'Face not recognized.\n(${3 - _failedAttempts} attempts left)';
-          });
-
-          await Future.delayed(const Duration(seconds: 3));
-          if (mounted) {
-            _canProcess = true;
-            _isProcessing = false;
-            _startStream();
-          }
+          _startDetectionLoop();
         }
       }
     } catch (e) {
@@ -233,16 +188,13 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
           _statusMessage = 'Detection error. Retrying...';
           _isProcessing = false;
         });
-        await Future.delayed(const Duration(seconds: 2));
-        if (mounted) {
-          _canProcess = true;
-        }
       }
     }
   }
 
   @override
   void dispose() {
+    _stopDetectionLoop();
     _cameraController?.dispose();
     _faceDetector.close();
     super.dispose();
