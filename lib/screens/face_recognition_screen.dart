@@ -19,11 +19,12 @@ class FaceRecognitionScreen extends StatefulWidget {
 
 class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
   CameraController? _cameraController;
+  CameraDescription? _frontCamera;
   final FaceDetector _faceDetector = FaceDetector(
     options: FaceDetectorOptions(
-      enableContours: true,
-      enableClassification: true,
-      performanceMode: FaceDetectorMode.accurate,
+      enableContours: false,
+      enableClassification: false,
+      performanceMode: FaceDetectorMode.fast,
     ),
   );
 
@@ -31,7 +32,8 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
   bool _isCameraInitialized = false;
   String _statusMessage = 'Looking for a face...';
   int _failedAttempts = 0;
-  Timer? _detectionTimer;
+  Timer? _detectionTimer; // Android only
+  bool _canProcess = true; // iOS stream guard
 
   // Theme color (Light Blue)
   final Color _primaryColor = const Color(0xFF89D3EE);
@@ -44,15 +46,18 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
 
   Future<void> _initializeCamera() async {
     final cameras = await availableCameras();
-    final frontCamera = cameras.firstWhere(
+    _frontCamera = cameras.firstWhere(
       (camera) => camera.lensDirection == CameraLensDirection.front,
       orElse: () => cameras.first,
     );
 
     _cameraController = CameraController(
-      frontCamera,
+      _frontCamera!,
       ResolutionPreset.medium,
       enableAudio: false,
+      imageFormatGroup: Platform.isIOS
+          ? ImageFormatGroup.bgra8888
+          : ImageFormatGroup.nv21,
     );
 
     try {
@@ -66,7 +71,11 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
         _isCameraInitialized = true;
       });
 
-      _startDetectionLoop();
+      if (Platform.isIOS) {
+        _startIOSStream();
+      } else {
+        _startAndroidTimer();
+      }
     } catch (e) {
       debugPrint('Camera init error: $e');
       if (mounted) {
@@ -78,35 +87,90 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
     }
   }
 
-  void _startDetectionLoop() {
+  // ── iOS: image stream (fast, no shutter flash) ──
+  void _startIOSStream() {
+    if (_cameraController == null || !_cameraController!.value.isInitialized)
+      return;
+    _canProcess = true;
+    _cameraController!.startImageStream((CameraImage image) {
+      if (_canProcess && !_isProcessing) {
+        _processIOSFrame(image);
+      }
+    });
+  }
+
+  Future<void> _processIOSFrame(CameraImage image) async {
+    if (!mounted || _cameraController == null) return;
+    _isProcessing = true;
+
+    try {
+      final WriteBuffer allBytes = WriteBuffer();
+      for (final Plane plane in image.planes) {
+        allBytes.putUint8List(plane.bytes);
+      }
+      final bytes = allBytes.done().buffer.asUint8List();
+
+      final inputImage = InputImage.fromBytes(
+        bytes: bytes,
+        metadata: InputImageMetadata(
+          size: Size(image.width.toDouble(), image.height.toDouble()),
+          rotation:
+              InputImageRotationValue.fromRawValue(
+                _frontCamera!.sensorOrientation,
+              ) ??
+              InputImageRotation.rotation0deg,
+          format: InputImageFormat.bgra8888,
+          bytesPerRow: image.planes[0].bytesPerRow,
+        ),
+      );
+
+      final faces = await _faceDetector.processImage(inputImage);
+
+      if (!mounted) return;
+
+      if (faces.isEmpty) {
+        setState(() {
+          _statusMessage = 'No face detected. Please position your face.';
+        });
+        _isProcessing = false;
+        return;
+      }
+
+      // Face found — stop stream, capture photo for server
+      _canProcess = false;
+      await _cameraController!.stopImageStream();
+      await _onFaceDetected();
+    } catch (e) {
+      debugPrint('iOS face detection error: $e');
+      _isProcessing = false;
+    }
+  }
+
+  // ── Android: timer + takePicture (reliable across devices) ──
+  void _startAndroidTimer() {
     _detectionTimer?.cancel();
     _detectionTimer = Timer.periodic(
       const Duration(milliseconds: 1500),
-      (_) => _detectFaceFromPicture(),
+      (_) => _processAndroidFrame(),
     );
   }
 
-  void _stopDetectionLoop() {
+  void _stopAndroidTimer() {
     _detectionTimer?.cancel();
     _detectionTimer = null;
   }
 
-  Future<void> _detectFaceFromPicture() async {
+  Future<void> _processAndroidFrame() async {
     if (_isProcessing) return;
-    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+    if (_cameraController == null || !_cameraController!.value.isInitialized)
       return;
-    }
-
-    setState(() {
-      _isProcessing = true;
-    });
+    _isProcessing = true;
 
     try {
       final XFile photo = await _cameraController!.takePicture();
       final inputImage = InputImage.fromFilePath(photo.path);
       final faces = await _faceDetector.processImage(inputImage);
 
-      // Clean up temp file
       try {
         await File(photo.path).delete();
       } catch (_) {}
@@ -116,20 +180,32 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
       if (faces.isEmpty) {
         setState(() {
           _statusMessage = 'No face detected. Please position your face.';
-          _isProcessing = false;
         });
+        _isProcessing = false;
         return;
       }
 
-      // Face detected — stop the loop and capture a final image for the server
-      _stopDetectionLoop();
+      // Face found — stop timer, capture photo for server
+      _stopAndroidTimer();
+      await _onFaceDetected();
+    } catch (e) {
+      debugPrint('Android face detection error: $e');
+      _isProcessing = false;
+    }
+  }
 
-      setState(() {
-        _statusMessage = 'Face detected! Capturing for verification...';
-      });
+  // ── Shared: once a face is detected on either platform ──
+  Future<void> _onFaceDetected() async {
+    if (!mounted) return;
 
+    setState(() {
+      _statusMessage = 'Face detected! Capturing for verification...';
+    });
+
+    try {
       final XFile verifyPhoto = await _cameraController!.takePicture();
 
+      if (!mounted) return;
       setState(() {
         _statusMessage = 'Verifying identity...';
       });
@@ -178,23 +254,35 @@ class _FaceRecognitionScreenState extends State<FaceRecognitionScreen> {
 
         await Future.delayed(const Duration(seconds: 3));
         if (mounted) {
-          _startDetectionLoop();
+          _restartDetection();
         }
       }
     } catch (e) {
-      debugPrint('Face detection error: $e');
+      debugPrint('Verification error: $e');
       if (mounted) {
         setState(() {
-          _statusMessage = 'Detection error. Retrying...';
+          _statusMessage = 'Verification error. Retrying...';
           _isProcessing = false;
         });
+        await Future.delayed(const Duration(seconds: 2));
+        if (mounted) _restartDetection();
       }
+    }
+  }
+
+  void _restartDetection() {
+    if (Platform.isIOS) {
+      _isProcessing = false;
+      _startIOSStream();
+    } else {
+      _isProcessing = false;
+      _startAndroidTimer();
     }
   }
 
   @override
   void dispose() {
-    _stopDetectionLoop();
+    _stopAndroidTimer();
     _cameraController?.dispose();
     _faceDetector.close();
     super.dispose();
