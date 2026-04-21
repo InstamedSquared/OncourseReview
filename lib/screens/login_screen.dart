@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
 import 'face_recognition_screen.dart';
+import 'main_shell.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -74,10 +75,17 @@ class _LoginScreenState extends State<LoginScreen> {
 
     if (result['success'] == true) {
       if (mounted) {
-        Navigator.push(
-            context,
-            MaterialPageRoute(
-                builder: (_) => const FaceRecognitionScreen()));
+        if (_usernameController.text.toLowerCase() == 'student') {
+          // Bypass face recognition for the Apple App Store Reviewer
+          Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(builder: (_) => const MainShell()));
+        } else {
+          Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (_) => const FaceRecognitionScreen()));
+        }
       }
     } else {
       if (mounted) {

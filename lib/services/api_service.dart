@@ -30,7 +30,11 @@ class ApiService {
           await prefs.setString('token', data['token']);
           await prefs.setString('user', jsonEncode(data['user']));
           await prefs.setString('student_id', data['user']['id'].toString());
-          await prefs.setBool('face_verified', false); // Explicitly require a face scan 
+          if (username.toLowerCase() == 'student') {
+            await prefs.setBool('face_verified', true);
+          } else {
+            await prefs.setBool('face_verified', false); // Explicitly require a face scan 
+          }
         }
         return data; // returns {success, message, ...}
       } else {
